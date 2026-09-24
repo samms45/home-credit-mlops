@@ -1,7 +1,7 @@
 # ============================================================
 # DONNEES — jamais sur GitHub (RGPD, volume, licence Kaggle)
 # ============================================================
-data/
+/data/
 
 # ============================================================
 # MLFLOW — artefacts et historique locaux, trop lourds
