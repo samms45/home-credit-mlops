@@ -39,3 +39,11 @@ venv/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+
+# ============================================================
+# TESTS — fichiers generes par pytest / coverage
+# ============================================================
+.coverage
+.pytest_cache/
+htmlcov/

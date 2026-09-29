@@ -22,3 +22,14 @@ dependencies = [
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["src*"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+]
+
+[tool.pytest.ini_options]
+# Indique a pytest de chercher les modules (app, src...) a la racine du projet
+# Sans ca, "from app.main import app" echoue car pytest ne trouve pas le dossier app/
+pythonpath = ["."]
