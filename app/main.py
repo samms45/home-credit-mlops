@@ -115,9 +115,25 @@ def predire(entree: DonneesClient):
             detail=f"Colonnes obligatoires manquantes : {colonnes_manquantes}",
         )
 
+
     # --------------------------------------------------------
     # 7.2 - VALIDATION 2 : regles metier (age, revenu, credit)
     # --------------------------------------------------------
+    # Petite aide : verifier qu'une valeur est bien un nombre.
+    # isinstance(x, (int, float)) = True si x est un entier ou un decimal.
+    # Le bool (True/False) est exclu car en Python bool est un sous-type de int.
+    def est_nombre(valeur):
+        return isinstance(valeur, (int, float)) and not isinstance(valeur, bool)
+
+    # On verifie le type AVANT de comparer, sinon "texte <= 0" plante.
+    for champ in ["DAYS_BIRTH", "AMT_INCOME_TOTAL", "AMT_CREDIT"]:
+        valeur = donnees.get(champ)
+        if valeur is not None and not est_nombre(valeur):
+            raise HTTPException(
+                status_code=422,
+                detail=f"{champ} doit etre un nombre (recu : {type(valeur).__name__}).",
+            )
+
     # Age : stocke en jours negatifs -> une valeur >= 0 est aberrante
     if donnees.get("DAYS_BIRTH", -1) >= 0:
         raise HTTPException(status_code=422, detail="DAYS_BIRTH doit etre negatif (age en jours).")
@@ -130,6 +146,7 @@ def predire(entree: DonneesClient):
     if donnees.get("AMT_CREDIT", 1) <= 0:
         raise HTTPException(status_code=422, detail="AMT_CREDIT doit etre strictement positif.")
 
+    
     # --------------------------------------------------------
     # 7.3 - PREDICTION (protegee contre les plantages)
     # --------------------------------------------------------
