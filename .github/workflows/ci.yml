@@ -10,9 +10,9 @@ name: CI  # nom du pipeline (visible dans l'onglet Actions)
 # ------------------------------------------------------------
 on:
   push:
-    branches: [ main, phase3-docker-cicd ]
+    branches: [ main ]
   pull_request:
-    branches: [ main, phase3-docker-cicd ]
+    branches: [ main ]
 
 
 # ------------------------------------------------------------
