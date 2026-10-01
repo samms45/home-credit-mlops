@@ -1,0 +1,62 @@
+# ============================================================
+# Pipeline CI - Integration Continue
+# Se declenche a chaque push sur main : tests + build Docker
+# ============================================================
+
+name: CI  # nom du pipeline (visible dans l'onglet Actions)
+
+# ------------------------------------------------------------
+# QUAND le pipeline se declenche
+# ------------------------------------------------------------
+on:
+  push:
+    branches: [ main, phase3-docker-cicd ]
+  pull_request:
+    branches: [ main, phase3-docker-cicd ]
+
+
+# ------------------------------------------------------------
+# pipeline (les "jobs")
+# ------------------------------------------------------------
+jobs:
+
+  # --- JOB 1 : lancer les tests ---
+  tests:
+    runs-on: ubuntu-latest    # le robot tourne sur une machine Linux fournie par GitHub
+
+    steps:
+      # 1. Recuperer le code du depot
+      - name: Recuperer le code
+        uses: actions/checkout@v4
+
+      # 2. Installer uv (le gestionnaire de dependances du projet)
+      - name: Installer uv
+        uses: astral-sh/setup-uv@v5
+
+      # 3. Installer Python 3.11 via uv
+      - name: Installer Python 3.11
+        run: uv python install 3.11
+
+      # 4. Installer les dependances du projet (dont pytest)
+      - name: Installer les dependances
+        run: uv sync
+
+      # 5. Lancer les tests avec mesure de couverture
+      - name: Lancer les tests
+        run: uv run pytest --cov=app
+
+
+  # --- JOB 2 : construire l'image Docker ---
+  # "needs: tests" = ce job ne s'execute QUE si le job "tests" a reussi
+  build-docker:
+    runs-on: ubuntu-latest
+    needs: tests              # dependance : build seulement si les tests passent
+
+    steps:
+      # 1. Recuperer dépôt (main.py, model/, Dockerfile…)
+      - name: Recuperer le code
+        uses: actions/checkout@v4
+
+      # 2. Construire l'image Docker (verifie que le Dockerfile fonctionne)
+      - name: Construire l'image Docker
+        run: docker build -t scoring-api .
