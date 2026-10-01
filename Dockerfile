@@ -68,4 +68,9 @@ EXPOSE 8000
 # --host 0.0.0.0 : OBLIGATOIRE dans Docker pour etre joignable de l'exterieur
 #                  (127.0.0.1 ne serait accessible que DANS la boite)
 # --port 8000 : le port d'ecoute
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+# Render fournit le port a utiliser via la variable d'environnement $PORT.
+# Si $PORT n'existe pas (ex: en local), on retombe sur 8000 par defaut.
+# La forme "shell" (sans crochets) permet d'utiliser la variable $PORT.
+CMD uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}
