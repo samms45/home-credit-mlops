@@ -1,0 +1,16 @@
+# Fichiers et dossiers a NE PAS envoyer a Docker lors du build
+# (plus rapide, image plus propre)
+
+.venv/
+.git/
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+tests/
+data/
+mlruns/
+mlflow.db
+*.md
+src/
+*.png
