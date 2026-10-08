@@ -81,17 +81,25 @@ DATABASE_URL = os.environ.get(
 def get_connexion():
     """Ouvre une connexion PostgreSQL a partir de DATABASE_URL.
 
-    pg8000 ne lit pas directement une URL : on la decoupe en morceaux
-    (user, password, host, port, database) avec urllib, puis on connecte.
+    Gere a la fois le local (Docker, sans SSL) et Render (avec SSL).
     """
     from urllib.parse import urlparse        # pour decouper l'URL en morceaux
     url = urlparse(DATABASE_URL)              # ex: postgresql://user:pass@host:5433/db
+
+    # Detecter si on est sur Render (pour activer le SSL, obligatoire la-bas)
+    # - URL interne Render : hostname commence par "dpg-"
+    # - URL externe Render : hostname contient "render.com"
+    # En local (Docker), aucun des deux -> pas de SSL
+    hote = url.hostname or ""
+    utilise_ssl = hote.startswith("dpg-") or "render.com" in hote
+
     return pg8000.Connection(
         user=url.username,
         password=url.password,
         host=url.hostname,
-        port=url.port,
-        database=url.path.lstrip("/"),        # enleve le "/" devant le nom de la base
+        port=url.port or 5432,                      # 5432 par defaut si pas de port dans l'URL
+        database=url.path.lstrip("/"),              # enleve le "/" devant le nom de la base
+        ssl_context=True if utilise_ssl else None,  # SSL sur Render, rien en local
     )
 
 
@@ -276,3 +284,48 @@ def predire_par_id(sk_id_curr: int):
         "date_calcul": str(date_calcul),          # quand le batch a calcule ce score
         "source": "precalcule",                   # pour distinguer du live
     }
+
+
+# ------------------------------------------------------------
+# 9. Route TEMPORAIRE : creer les tables dans la base deployee
+# ------------------------------------------------------------
+# GET /init-db
+# A appeler UNE SEULE FOIS apres le deploiement pour creer les tables
+# clients et logs dans la base Render (le PC local est bloque par le firewall).
+# A supprimer ou proteger apres usage.
+@app.get("/init-db")
+def init_db():
+    """Cree les tables clients et logs dans la base (si elles n'existent pas)."""
+
+    # Le SQL de creation des 2 tables (repris de db/init.sql)
+    sql = """
+    CREATE TABLE IF NOT EXISTS clients (
+        sk_id_curr   BIGINT       PRIMARY KEY,
+        features     JSONB        NOT NULL,
+        proba        REAL         NOT NULL,
+        decision     SMALLINT     NOT NULL,
+        date_calcul  TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS logs (
+        id                  BIGSERIAL  PRIMARY KEY,
+        sk_id_curr          BIGINT,
+        inputs              JSONB      NOT NULL,
+        proba               REAL       NOT NULL,
+        decision            SMALLINT   NOT NULL,
+        temps_inference_ms  REAL       NOT NULL,
+        latence_totale_ms   REAL       NOT NULL,
+        timestamp_appel     TIMESTAMP  NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs (timestamp_appel);
+    """
+
+    # Executer le SQL sur la base
+    conn = get_connexion()
+    try:
+        conn.run(sql)
+    finally:
+        conn.close()
+
+    return {"message": "Tables clients et logs creees (ou deja existantes)."}
