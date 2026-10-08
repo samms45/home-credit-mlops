@@ -47,3 +47,5 @@ desktop.ini
 .coverage
 .pytest_cache/
 htmlcov/
+# Donnees locales (non versionnees)
+data/
