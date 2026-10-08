@@ -9,14 +9,32 @@ import pandas as pd                  # manipulation des données
 import pg8000.native as pg8000       # lecture de la table logs
 import streamlit as st               # le framework de dashboard
 
-# ─── PARAMÈTRES DE CONNEXION (base locale) ─────────────────────
+
+# ─── PARAMÈTRES DE CONNEXION ───────────────────────────────────
+# On lit l'URL de la base depuis une variable d'environnement DATABASE_URL.
+# - En local : valeur par defaut (base Docker sur le port 5433)
+# - En deploiement (Streamlit Cloud) : on definira DATABASE_URL dans les secrets
+import os                                 # pour lire les variables d'environnement
+from urllib.parse import urlparse         # pour decouper l'URL en morceaux
+
+DATABASE_URL = os.environ.get(
+    "DATABASE_URL",
+    "postgresql://credit_user:credit_pass@localhost:5433/credit_scoring",  # defaut local
+)
+
+# Decouper l'URL et detecter si on doit activer le SSL (Render) comme dans l'API
+_url = urlparse(DATABASE_URL)
+_hote = _url.hostname or ""
+_utilise_ssl = _hote.startswith("dpg-") or "render.com" in _hote
+
 DB_PARAMS = {
-    "user": "credit_user",
-    "password": "credit_pass",
-    "host": "localhost",
-    "port": 5433,
-    "database": "credit_scoring",
+    "user": _url.username,
+    "password": _url.password,
+    "host": _url.hostname,
+    "port": _url.port or 5432,            # 5432 par defaut si pas de port dans l'URL
+    "database": _url.path.lstrip("/"),    # enleve le "/" devant le nom de la base
 }
+
 
 # ─── CONFIGURATION DE LA PAGE ──────────────────────────────────
 st.set_page_config(
@@ -31,7 +49,7 @@ st.caption("Données issues de la table `logs` (appels de production)")
 @st.cache_data
 def charger_logs():
     """Lit tous les appels de la table logs et renvoie un DataFrame."""
-    conn = pg8000.Connection(**DB_PARAMS)
+    conn = pg8000.Connection(**DB_PARAMS, ssl_context=True if _utilise_ssl else None)
     try:
         # On récupère les colonnes utiles au monitoring
         resultat = conn.run(
