@@ -1,0 +1,37 @@
+# ═══════════════════════════════════════════════════════════════
+# docker-compose.yml — Lance la base PostgreSQL du projet
+# Commande : docker-compose up   (depuis la racine du projet)
+# ═══════════════════════════════════════════════════════════════
+
+services:
+  # ─── Service unique pour l'instant : la base de données ───
+  db:
+    image: postgres:16                 # image officielle Postgres, version 16 figée (reproductibilité)
+    container_name: home-credit-db     # nom lisible du conteneur (sinon nom auto généré)
+    restart: unless-stopped            # redémarre tout seul sauf si tu l'arrêtes volontairement
+
+    # ─── Identifiants de connexion à la base ───
+    # Postgres lit ces variables au démarrage pour créer l'utilisateur et la base
+    environment:
+      POSTGRES_USER: credit_user       # nom d'utilisateur de la base
+      POSTGRES_PASSWORD: credit_pass   # mot de passe (en local seulement ! on sécurisera pour le déployé)
+      POSTGRES_DB: credit_scoring      # nom de la base créée automatiquement
+
+    # ─── Port : expose la base sur ta machine ───
+    # format "hôte:conteneur" → tu te connectes via localhost:5432
+    ports:
+       - "5433:5432"    # 5433 côté Windows (évite le conflit avec le Postgres natif), 5432 dans le conteneur
+      
+
+    # ─── Branchements (volumes) ───
+    volumes:
+      # 1. Ton init.sql exécuté AU PREMIER démarrage (crée les 2 tables)
+      #    Le dossier /docker-entrypoint-initdb.d/ est magique : Postgres y lance tous les .sql
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+
+      # 2. Volume nommé : les données de la base persistent entre les redémarrages
+      - pgdata:/var/lib/postgresql/data
+
+# ─── Déclaration du volume nommé utilisé ci-dessus ───
+volumes:
+  pgdata:

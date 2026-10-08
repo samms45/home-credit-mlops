@@ -5,12 +5,16 @@
 # Modele    : charge UNE SEULE FOIS au demarrage (pas a chaque requete)
 # ============================================================
 
+import time                          # pour chronometrer (temps d'inference + latence)
 from pathlib import Path            # pour construire des chemins de fichiers proprement
 import mlflow.pyfunc                 # pour charger le modele au format MLflow
 import pandas as pd                  # pour construire le tableau attendu par le modele
 
 from fastapi import FastAPI          # le framework d'API
 from pydantic import BaseModel       # pour decrire/valider les donnees recues
+
+import os                            # pour lire les variables d'environnement (DATABASE_URL)
+import pg8000.native as pg8000       # driver PostgreSQL (meme que le batch, evite le bug Windows)
 
 from fastapi import FastAPI, HTTPException   # HTTPException : pour renvoyer des erreurs propres (422, etc.)
 
@@ -61,6 +65,36 @@ print(f"Colonnes attendues : {len(COLONNES_ATTENDUES)} | obligatoires : {len(COL
 SEUIL = float((DOSSIER_MODELE / "seuil.txt").read_text().strip())
 print(f"Seuil de decision : {SEUIL}")
 
+
+# ------------------------------------------------------------
+# Connexion a la base PostgreSQL (facon B)
+# ------------------------------------------------------------
+# On lit l'URL de connexion depuis une variable d'environnement.
+# En local : valeur par defaut ci-dessous (base Docker sur le port 5433).
+# En production (Render) : on definira DATABASE_URL dans les variables du service.
+# Format attendu : postgresql://user:password@host:port/database
+DATABASE_URL = os.environ.get(
+    "DATABASE_URL",
+    "postgresql://credit_user:credit_pass@localhost:5433/credit_scoring",  # defaut local
+)
+
+def get_connexion():
+    """Ouvre une connexion PostgreSQL a partir de DATABASE_URL.
+
+    pg8000 ne lit pas directement une URL : on la decoupe en morceaux
+    (user, password, host, port, database) avec urllib, puis on connecte.
+    """
+    from urllib.parse import urlparse        # pour decouper l'URL en morceaux
+    url = urlparse(DATABASE_URL)              # ex: postgresql://user:pass@host:5433/db
+    return pg8000.Connection(
+        user=url.username,
+        password=url.password,
+        host=url.hostname,
+        port=url.port,
+        database=url.path.lstrip("/"),        # enleve le "/" devant le nom de la base
+    )
+
+
 # ------------------------------------------------------------
 # 4. Creer l'application FastAPI
 # ------------------------------------------------------------
@@ -94,38 +128,33 @@ class DonneesClient(BaseModel):
 
 
 # ------------------------------------------------------------
-# 7. Route /predict, en POST (on ENVOIE des donnees)
+# 7. Route /predict, en POST (on ENVOIE des donnees) - LIVE
 # ------------------------------------------------------------
 @app.post("/predict")
 def predire(entree: DonneesClient):
-    """Recoit les donnees d'un client, valide, puis renvoie la proba de defaut et la decision."""
+    """Recoit les donnees d'un client, valide, renvoie la proba + decision, et LOGUE l'appel."""
+
+    # CHRONO 1 : debut de la latence totale (toute la requete)
+    debut_total = time.perf_counter()
 
     donnees = entree.donnees   # le dictionnaire {colonne: valeur} du client
 
     # --------------------------------------------------------
     # 7.1 - VALIDATION 1 : colonnes obligatoires presentes
     # --------------------------------------------------------
-    # On cherche les colonnes obligatoires ABSENTES du client recu.
     colonnes_manquantes = [c for c in COLONNES_OBLIGATOIRES if c not in donnees]
     if colonnes_manquantes:
-        # HTTPException(422, ...) : erreur PROPRE au lieu d'un plantage
-        # 422 = "donnees invalides" (Unprocessable Entity)
         raise HTTPException(
             status_code=422,
             detail=f"Colonnes obligatoires manquantes : {colonnes_manquantes}",
         )
 
-
     # --------------------------------------------------------
     # 7.2 - VALIDATION 2 : regles metier (age, revenu, credit)
     # --------------------------------------------------------
-    # Petite aide : verifier qu'une valeur est bien un nombre.
-    # isinstance(x, (int, float)) = True si x est un entier ou un decimal.
-    # Le bool (True/False) est exclu car en Python bool est un sous-type de int.
     def est_nombre(valeur):
         return isinstance(valeur, (int, float)) and not isinstance(valeur, bool)
 
-    # On verifie le type AVANT de comparer, sinon "texte <= 0" plante.
     for champ in ["DAYS_BIRTH", "AMT_INCOME_TOTAL", "AMT_CREDIT"]:
         valeur = donnees.get(champ)
         if valeur is not None and not est_nombre(valeur):
@@ -134,37 +163,116 @@ def predire(entree: DonneesClient):
                 detail=f"{champ} doit etre un nombre (recu : {type(valeur).__name__}).",
             )
 
-    # Age : stocke en jours negatifs -> une valeur >= 0 est aberrante
     if donnees.get("DAYS_BIRTH", -1) >= 0:
         raise HTTPException(status_code=422, detail="DAYS_BIRTH doit etre negatif (age en jours).")
-
-    # Revenu : doit etre strictement positif
     if donnees.get("AMT_INCOME_TOTAL", 1) <= 0:
         raise HTTPException(status_code=422, detail="AMT_INCOME_TOTAL doit etre strictement positif.")
-
-    # Montant du credit : doit etre strictement positif
     if donnees.get("AMT_CREDIT", 1) <= 0:
         raise HTTPException(status_code=422, detail="AMT_CREDIT doit etre strictement positif.")
 
-    
     # --------------------------------------------------------
-    # 7.3 - PREDICTION (protegee contre les plantages)
+    # 7.3 - PREDICTION (avec chrono du temps d'inference)
     # --------------------------------------------------------
     try:
-        # Transformer le dictionnaire en DataFrame d'une ligne
         df_client = pd.DataFrame([donnees])
-        # Probabilite de defaut (classe 1)
+
+        # CHRONO 2 : uniquement autour du calcul du modele (temps d'inference pur)
+        debut_inference = time.perf_counter()
         proba = modele_sklearn.predict_proba(df_client)[0][1]
+        temps_inference_ms = (time.perf_counter() - debut_inference) * 1000  # en millisecondes
+
     except Exception as e:
-        # Si le modele plante (ex: type incorrect), on renvoie un 422 clair
         raise HTTPException(status_code=422, detail=f"Erreur lors de la prediction : {str(e)}")
 
     # --------------------------------------------------------
-    # 7.4 - Appliquer le seuil et renvoyer le resultat
+    # 7.4 - Appliquer le seuil
     # --------------------------------------------------------
     decision = int(proba >= SEUIL)
+
+    # Fin de la latence totale (toute la requete jusqu'ici)
+    latence_totale_ms = (time.perf_counter() - debut_total) * 1000  # en millisecondes
+
+    # --------------------------------------------------------
+    # 7.5 - LOGUER l'appel dans la table logs (monitoring)
+    # --------------------------------------------------------
+    # Entoure d'un try/except : si la base est indisponible, on NE bloque PAS
+    # la reponse au client. Le log est "best-effort".
+    try:
+        import json                              # pour serialiser les inputs en JSON
+        # Recuperer l'identifiant client s'il est fourni (sinon None)
+        sk_id = donnees.get("SK_ID_CURR")
+        sk_id = int(sk_id) if sk_id is not None else None
+
+        conn = get_connexion()                   # meme fonction que la facon B
+        try:
+            conn.run(
+                """
+                INSERT INTO logs
+                    (sk_id_curr, inputs, proba, decision, temps_inference_ms, latence_totale_ms)
+                VALUES
+                    (:sk_id, :inputs, :proba, :decision, :t_inf, :t_tot)
+                """,
+                sk_id=sk_id,
+                inputs=json.dumps(donnees),      # les features recues, en JSON
+                proba=float(proba),
+                decision=decision,
+                t_inf=float(temps_inference_ms),
+                t_tot=float(latence_totale_ms),
+            )
+        finally:
+            conn.close()
+    except Exception as e:
+        # On n'interrompt pas la reponse : on signale juste dans la console
+        print(f"[WARN] Echec de l'ecriture du log : {e}")
+
+    # --------------------------------------------------------
+    # 7.6 - Renvoyer le resultat au client
+    # --------------------------------------------------------
     return {
         "probabilite_defaut": round(float(proba), 4),
         "decision": decision,             # 0 = credit ok | 1 = risque
         "seuil_utilise": SEUIL,
+        "temps_inference_ms": round(temps_inference_ms, 2),   # info utile cote client
+        "latence_totale_ms": round(latence_totale_ms, 2),
+    }
+
+
+# ------------------------------------------------------------
+# 8. Route FACON B : score precalcule par identifiant client
+# ------------------------------------------------------------
+# GET /predict/{sk_id_curr}
+# Lit le score DEJA calcule dans la table clients (pas de recalcul).
+# Repond instantanement pour un client connu, 404 si inconnu.
+@app.get("/predict/{sk_id_curr}")
+def predire_par_id(sk_id_curr: int):
+    """Renvoie le score precalcule d'un client connu, a partir de son identifiant."""
+
+    # Ouvrir la connexion a la base
+    conn = get_connexion()
+    try:
+        # Chercher le client dans la table clients
+        # :id est un parametre nomme (securise contre l'injection SQL)
+        resultat = conn.run(
+            "SELECT proba, decision, date_calcul FROM clients WHERE sk_id_curr = :id",
+            id=sk_id_curr,
+        )
+    finally:
+        conn.close()   # on ferme toujours la connexion, meme en cas d'erreur
+
+    # resultat est une liste de lignes. Vide = client pas trouve.
+    if not resultat:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Client {sk_id_curr} introuvable dans la base des scores precalcules.",
+        )
+
+    # On a trouve : resultat[0] = la premiere (et seule) ligne [proba, decision, date_calcul]
+    proba, decision, date_calcul = resultat[0]
+    return {
+        "sk_id_curr": sk_id_curr,
+        "probabilite_defaut": round(float(proba), 4),
+        "decision": int(decision),               # 0 = credit ok | 1 = risque
+        "seuil_utilise": SEUIL,
+        "date_calcul": str(date_calcul),          # quand le batch a calcule ce score
+        "source": "precalcule",                   # pour distinguer du live
     }
