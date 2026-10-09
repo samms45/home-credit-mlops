@@ -10,7 +10,8 @@ import pandas as pd               # pour lire le CSV
 import requests                   # pour envoyer des requêtes HTTP à l'API
 
 # ─── PARAMÈTRES ────────────────────────────────────────────────
-API_URL = "http://127.0.0.1:8000/predict"              # route POST live
+# API_URL = "http://127.0.0.1:8000/predict"              # route POST live
+API_URL = "https://home-credit-mlops-w8ku.onrender.com/predict"   # API DEPLOYEE (Render)
 DATA_PATH = "data/X_test_enrichi.csv"                  # source des clients
 N_NORMAUX = 50                                         # appels sans drift (A)
 N_DERIVES = 50                                         # appels avec drift (B)
