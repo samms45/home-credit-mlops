@@ -16,7 +16,11 @@ from pydantic import BaseModel       # pour decrire/valider les donnees recues
 import os                            # pour lire les variables d'environnement (DATABASE_URL)
 import pg8000.native as pg8000       # driver PostgreSQL (meme que le batch, evite le bug Windows)
 
-from fastapi import FastAPI, HTTPException   # HTTPException : pour renvoyer des erreurs propres (422, etc.)
+from fastapi import FastAPI, HTTPException, Depends, Security   # Depends/Security : pour l'auth, # HTTPException : pour renvoyer des erreurs propres (422, etc.)
+from fastapi.security import APIKeyHeader                       # pour lire la cle dans le header
+
+from dotenv import load_dotenv   # pour charger le fichier .env (secrets locaux)
+load_dotenv()                     # lit .env si present (local) ; ne fait rien sans (Render/CI)
 
 # ------------------------------------------------------------
 # 1. Localiser le dossier du modele
@@ -113,6 +117,30 @@ app = FastAPI(
 )
 
 # ------------------------------------------------------------
+# 4bis. Authentification par cle API
+# ------------------------------------------------------------
+# Principe : chaque appel aux routes protegees doit fournir une cle
+# secrete dans le header "X-API-Key". Sans cle valide -> 401 Unauthorized.
+#
+# La cle est lue depuis une variable d'environnement API_KEY :
+#   - en local  : valeur par defaut ci-dessous (pour developper sans config)
+#   - sur Render : on definira API_KEY dans les variables du service
+API_KEY = os.environ.get("API_KEY", "cle-dev-locale")
+
+# Indique a FastAPI de chercher la cle dans le header "X-API-Key"
+# auto_error=False : on gere nous-memes l'erreur pour un message clair
+entete_cle_api = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+def verifier_cle_api(cle_fournie: str = Security(entete_cle_api)):
+    """Verifie la cle API du header. Leve 401 si absente ou invalide."""
+    if cle_fournie != API_KEY:
+        raise HTTPException(
+            status_code=401,
+            detail="Cle API manquante ou invalide (header X-API-Key).",
+        )
+    return cle_fournie
+
+# ------------------------------------------------------------
 # 5. Route de test : verifier que l'API demarre
 # ------------------------------------------------------------
 # @app.get("/") : quand on visite la racine de l'API, cette fonction s'execute
@@ -138,7 +166,7 @@ class DonneesClient(BaseModel):
 # ------------------------------------------------------------
 # 7. Route /predict, en POST (on ENVOIE des donnees) - LIVE
 # ------------------------------------------------------------
-@app.post("/predict")
+@app.post("/predict", dependencies=[Depends(verifier_cle_api)])
 def predire(entree: DonneesClient):
     """Recoit les donnees d'un client, valide, renvoie la proba + decision, et LOGUE l'appel."""
 
@@ -251,7 +279,7 @@ def predire(entree: DonneesClient):
 # GET /predict/{sk_id_curr}
 # Lit le score DEJA calcule dans la table clients (pas de recalcul).
 # Repond instantanement pour un client connu, 404 si inconnu.
-@app.get("/predict/{sk_id_curr}")
+@app.get("/predict/{sk_id_curr}", dependencies=[Depends(verifier_cle_api)])
 def predire_par_id(sk_id_curr: int):
     """Renvoie le score precalcule d'un client connu, a partir de son identifiant."""
 

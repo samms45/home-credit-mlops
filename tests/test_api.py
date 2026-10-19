@@ -5,10 +5,19 @@
 # ============================================================
 
 from fastapi.testclient import TestClient   # simule des appels a l'API sans lancer uvicorn
-from app.main import app                      # on importe notre application FastAPI
+from app.main import app, API_KEY   # on importe AUSSI la cle que l'API utilise
 
 # Le client de test : il "appelle" l'API en memoire
 client = TestClient(app)
+
+# ------------------------------------------------------------
+# Cle API pour les tests
+# ------------------------------------------------------------
+# On reutilise la cle REELLEMENT resolue par l'API (importee ci-dessus) :
+#   - en local -> la cle du .env (ma-cle-locale-secrete)
+#   - en CI     -> la valeur par defaut "cle-dev-locale" (pas de .env)
+# Ainsi le test passe l'auth dans LES DEUX environnements.
+ENTETES = {"X-API-Key": API_KEY}
 
 # ------------------------------------------------------------
 # Un client valide reutilisable pour les tests
@@ -52,6 +61,7 @@ CLIENT_VALIDE = {
 
 # ------------------------------------------------------------
 # TEST 1 : la route d'accueil "/" repond bien
+# (route PUBLIQUE -> pas besoin de cle API)
 # ------------------------------------------------------------
 def test_accueil():
     reponse = client.get("/")                    # on appelle la route /
@@ -62,7 +72,7 @@ def test_accueil():
 # TEST 2 : un client valide renvoie une prediction (200)
 # ------------------------------------------------------------
 def test_predict_client_valide():
-    reponse = client.post("/predict", json={"donnees": CLIENT_VALIDE})
+    reponse = client.post("/predict", json={"donnees": CLIENT_VALIDE}, headers=ENTETES)
     assert reponse.status_code == 200
     # la reponse doit contenir la decision et la probabilite
     corps = reponse.json()
@@ -77,7 +87,7 @@ def test_predict_colonne_manquante():
     # On copie le client valide et on RETIRE une colonne obligatoire
     client_incomplet = CLIENT_VALIDE.copy()
     del client_incomplet["AMT_CREDIT"]           # on supprime AMT_CREDIT
-    reponse = client.post("/predict", json={"donnees": client_incomplet})
+    reponse = client.post("/predict", json={"donnees": client_incomplet}, headers=ENTETES)
     assert reponse.status_code == 422            # l'API doit refuser proprement
 
 # ------------------------------------------------------------
@@ -86,7 +96,7 @@ def test_predict_colonne_manquante():
 def test_predict_revenu_invalide():
     client_mauvais = CLIENT_VALIDE.copy()
     client_mauvais["AMT_INCOME_TOTAL"] = 0       # revenu a 0 (interdit)
-    reponse = client.post("/predict", json={"donnees": client_mauvais})
+    reponse = client.post("/predict", json={"donnees": client_mauvais}, headers=ENTETES)
     assert reponse.status_code == 422
 
 
@@ -96,7 +106,7 @@ def test_predict_revenu_invalide():
 def test_predict_age_invalide():
     client_mauvais = CLIENT_VALIDE.copy()
     client_mauvais["DAYS_BIRTH"] = 13506         # positif = aberrant (doit etre negatif)
-    reponse = client.post("/predict", json={"donnees": client_mauvais})
+    reponse = client.post("/predict", json={"donnees": client_mauvais}, headers=ENTETES)
     assert reponse.status_code == 422
 
 # ------------------------------------------------------------
@@ -105,7 +115,7 @@ def test_predict_age_invalide():
 def test_predict_type_incorrect():
     client_mauvais = CLIENT_VALIDE.copy()
     client_mauvais["AMT_CREDIT"] = "beaucoup"    # texte au lieu d'un nombre
-    reponse = client.post("/predict", json={"donnees": client_mauvais})
+    reponse = client.post("/predict", json={"donnees": client_mauvais}, headers=ENTETES)
     assert reponse.status_code == 422            # le modele plante -> capte par le bloc except
 
 
@@ -115,5 +125,16 @@ def test_predict_type_incorrect():
 def test_predict_credit_invalide():
     client_mauvais = CLIENT_VALIDE.copy()
     client_mauvais["AMT_CREDIT"] = 0             # credit a 0 (interdit)
-    reponse = client.post("/predict", json={"donnees": client_mauvais})
+    reponse = client.post("/predict", json={"donnees": client_mauvais}, headers=ENTETES)
     assert reponse.status_code == 422
+
+
+# ------------------------------------------------------------
+# TEST 8 : securite -> appel SANS cle API -> erreur 401
+# ------------------------------------------------------------
+# Ce test prouve que l'authentification fonctionne : on envoie des
+# donnees VALIDES mais AUCUN header X-API-Key -> l'API doit refuser
+# l'acces avec un code 401 (objectif SMART n2 : securisation de l'API).
+def test_predict_sans_cle():
+    reponse = client.post("/predict", json={"donnees": CLIENT_VALIDE})  # <-- pas de headers
+    assert reponse.status_code == 401            # acces refuse : cle manquante
