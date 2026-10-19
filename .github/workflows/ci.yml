@@ -1,9 +1,9 @@
 # ============================================================
-# Pipeline CI - Integration Continue
-# Se declenche a chaque push sur main : tests + build Docker
+# Pipeline CI/CD - Integration & Deploiement Continus
+# Push sur main : tests -> build Docker -> deploiement Render
 # ============================================================
 
-name: CI  # nom du pipeline (visible dans l'onglet Actions)
+name: CI/CD  # nom du pipeline (visible dans l'onglet Actions)
 
 # ------------------------------------------------------------
 # QUAND le pipeline se declenche
@@ -53,10 +53,27 @@ jobs:
     needs: tests              # dependance : build seulement si les tests passent
 
     steps:
-      # 1. Recuperer dépôt (main.py, model/, Dockerfile…)
+      # 1. Recuperer depot (main.py, model/, Dockerfile…)
       - name: Recuperer le code
         uses: actions/checkout@v4
 
       # 2. Construire l'image Docker (verifie que le Dockerfile fonctionne)
       - name: Construire l'image Docker
         run: docker build -t scoring-api .
+
+
+  # --- JOB 3 : deployer sur Render (CD) ---
+  # needs: build-docker  -> ne se lance QUE si tests + build ont reussi
+  # if: ...              -> uniquement sur un PUSH sur main (jamais sur une pull request)
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build-docker
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      # Declencher le deploiement Render en appelant le Deploy Hook
+      # L'URL secrete est stockee dans les secrets GitHub (jamais en clair ici)
+      - name: Declencher le deploiement Render
+        run: curl -X POST "$RENDER_DEPLOY_HOOK_URL"
+        env:
+          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
