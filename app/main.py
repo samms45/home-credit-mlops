@@ -108,6 +108,54 @@ def get_connexion():
 
 
 # ------------------------------------------------------------
+# Fonction : logguer un appel dans la table logs (OK ou ERREUR)
+# ------------------------------------------------------------
+# Appelee pour CHAQUE appel a /predict :
+#   - en cas de succes  : statut="ok",    proba/decision/temps renseignes
+#   - en cas d'erreur   : statut="erreur", proba/decision/temps = None, + code + message
+# Best-effort : si la base est indisponible, on NE bloque PAS la reponse.
+def logger_appel(donnees, proba, decision, temps_inference_ms, latence_totale_ms,
+                 statut, code_http, message_erreur):
+    """Ecrit une ligne dans la table logs (appel reussi ou en erreur)."""
+    try:
+        import json                              # pour serialiser les inputs en JSON
+
+        # Recuperer l'identifiant client s'il est exploitable (sinon None)
+        sk_id = donnees.get("SK_ID_CURR")
+        try:
+            sk_id = int(sk_id) if sk_id is not None else None
+        except (ValueError, TypeError):
+            sk_id = None                         # input malforme -> on ne casse pas le log
+
+        conn = get_connexion()
+        try:
+            conn.run(
+                """
+                INSERT INTO logs
+                    (sk_id_curr, inputs, proba, decision, temps_inference_ms,
+                     latence_totale_ms, statut, code_http, message_erreur)
+                VALUES
+                    (:sk_id, :inputs, :proba, :decision, :t_inf,
+                     :t_tot, :statut, :code, :msg)
+                """,
+                sk_id=sk_id,
+                inputs=json.dumps(donnees),                      # features recues, en JSON
+                proba=float(proba) if proba is not None else None,
+                decision=int(decision) if decision is not None else None,
+                t_inf=float(temps_inference_ms) if temps_inference_ms is not None else None,
+                t_tot=float(latence_totale_ms),
+                statut=statut,
+                code=code_http,
+                msg=message_erreur,
+            )
+        finally:
+            conn.close()
+    except Exception as e:
+        # On n'interrompt pas la reponse : on signale juste dans la console
+        print(f"[WARN] Echec de l'ecriture du log : {e}")
+
+
+# ------------------------------------------------------------
 # 4. Creer l'application FastAPI
 # ------------------------------------------------------------
 app = FastAPI(
@@ -158,7 +206,6 @@ def accueil():
 # On recevra un JSON avec une cle "donnees" : un dictionnaire
 # {nom_colonne: valeur} decrivant UN client.
 # Exemple : {"donnees": {"SK_ID_CURR": 100002, "AMT_CREDIT": 406597.5, ...}}
-# La validation stricte des 81 colonnes viendra a l'etape 2.5.
 class DonneesClient(BaseModel):
     donnees: dict   # les colonnes du client sous forme {nom: valeur}
 
@@ -166,111 +213,102 @@ class DonneesClient(BaseModel):
 # ------------------------------------------------------------
 # 7. Route /predict, en POST (on ENVOIE des donnees) - LIVE
 # ------------------------------------------------------------
+# NOUVEAU : tout le traitement est entoure d'un try/except HTTPException.
+#   - si tout se passe bien -> on logue statut="ok" et on renvoie le resultat
+#   - si une erreur est levee -> on logue statut="erreur" (code + message) PUIS on relaie l'erreur
 @app.post("/predict", dependencies=[Depends(verifier_cle_api)])
 def predire(entree: DonneesClient):
-    """Recoit les donnees d'un client, valide, renvoie la proba + decision, et LOGUE l'appel."""
+    """Recoit les donnees d'un client, valide, renvoie la proba + decision, et LOGUE l'appel (ok ou erreur)."""
 
     # CHRONO 1 : debut de la latence totale (toute la requete)
     debut_total = time.perf_counter()
 
     donnees = entree.donnees   # le dictionnaire {colonne: valeur} du client
+    temps_inference_ms = None  # reste None si on echoue avant l'inference (pour le log d'erreur)
 
-    # --------------------------------------------------------
-    # 7.1 - VALIDATION 1 : colonnes obligatoires presentes
-    # --------------------------------------------------------
-    colonnes_manquantes = [c for c in COLONNES_OBLIGATOIRES if c not in donnees]
-    if colonnes_manquantes:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Colonnes obligatoires manquantes : {colonnes_manquantes}",
-        )
-
-    # --------------------------------------------------------
-    # 7.2 - VALIDATION 2 : regles metier (age, revenu, credit)
-    # --------------------------------------------------------
-    def est_nombre(valeur):
-        return isinstance(valeur, (int, float)) and not isinstance(valeur, bool)
-
-    for champ in ["DAYS_BIRTH", "AMT_INCOME_TOTAL", "AMT_CREDIT"]:
-        valeur = donnees.get(champ)
-        if valeur is not None and not est_nombre(valeur):
+    try:
+        # --------------------------------------------------------
+        # 7.1 - VALIDATION 1 : colonnes obligatoires presentes
+        # --------------------------------------------------------
+        colonnes_manquantes = [c for c in COLONNES_OBLIGATOIRES if c not in donnees]
+        if colonnes_manquantes:
             raise HTTPException(
                 status_code=422,
-                detail=f"{champ} doit etre un nombre (recu : {type(valeur).__name__}).",
+                detail=f"Colonnes obligatoires manquantes : {colonnes_manquantes}",
             )
 
-    if donnees.get("DAYS_BIRTH", -1) >= 0:
-        raise HTTPException(status_code=422, detail="DAYS_BIRTH doit etre negatif (age en jours).")
-    if donnees.get("AMT_INCOME_TOTAL", 1) <= 0:
-        raise HTTPException(status_code=422, detail="AMT_INCOME_TOTAL doit etre strictement positif.")
-    if donnees.get("AMT_CREDIT", 1) <= 0:
-        raise HTTPException(status_code=422, detail="AMT_CREDIT doit etre strictement positif.")
+        # --------------------------------------------------------
+        # 7.2 - VALIDATION 2 : regles metier (age, revenu, credit)
+        # --------------------------------------------------------
+        def est_nombre(valeur):
+            return isinstance(valeur, (int, float)) and not isinstance(valeur, bool)
 
-    # --------------------------------------------------------
-    # 7.3 - PREDICTION (avec chrono du temps d'inference)
-    # --------------------------------------------------------
-    try:
-        df_client = pd.DataFrame([donnees])
+        for champ in ["DAYS_BIRTH", "AMT_INCOME_TOTAL", "AMT_CREDIT"]:
+            valeur = donnees.get(champ)
+            if valeur is not None and not est_nombre(valeur):
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"{champ} doit etre un nombre (recu : {type(valeur).__name__}).",
+                )
 
-        # CHRONO 2 : uniquement autour du calcul du modele (temps d'inference pur)
-        debut_inference = time.perf_counter()
-        proba = modele_sklearn.predict_proba(df_client)[0][1]
-        temps_inference_ms = (time.perf_counter() - debut_inference) * 1000  # en millisecondes
+        if donnees.get("DAYS_BIRTH", -1) >= 0:
+            raise HTTPException(status_code=422, detail="DAYS_BIRTH doit etre negatif (age en jours).")
+        if donnees.get("AMT_INCOME_TOTAL", 1) <= 0:
+            raise HTTPException(status_code=422, detail="AMT_INCOME_TOTAL doit etre strictement positif.")
+        if donnees.get("AMT_CREDIT", 1) <= 0:
+            raise HTTPException(status_code=422, detail="AMT_CREDIT doit etre strictement positif.")
 
-    except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Erreur lors de la prediction : {str(e)}")
-
-    # --------------------------------------------------------
-    # 7.4 - Appliquer le seuil
-    # --------------------------------------------------------
-    decision = int(proba >= SEUIL)
-
-    # Fin de la latence totale (toute la requete jusqu'ici)
-    latence_totale_ms = (time.perf_counter() - debut_total) * 1000  # en millisecondes
-
-    # --------------------------------------------------------
-    # 7.5 - LOGUER l'appel dans la table logs (monitoring)
-    # --------------------------------------------------------
-    # Entoure d'un try/except : si la base est indisponible, on NE bloque PAS
-    # la reponse au client. Le log est "best-effort".
-    try:
-        import json                              # pour serialiser les inputs en JSON
-        # Recuperer l'identifiant client s'il est fourni (sinon None)
-        sk_id = donnees.get("SK_ID_CURR")
-        sk_id = int(sk_id) if sk_id is not None else None
-
-        conn = get_connexion()                   # meme fonction que la facon B
+        # --------------------------------------------------------
+        # 7.3 - PREDICTION (avec chrono du temps d'inference)
+        # --------------------------------------------------------
         try:
-            conn.run(
-                """
-                INSERT INTO logs
-                    (sk_id_curr, inputs, proba, decision, temps_inference_ms, latence_totale_ms)
-                VALUES
-                    (:sk_id, :inputs, :proba, :decision, :t_inf, :t_tot)
-                """,
-                sk_id=sk_id,
-                inputs=json.dumps(donnees),      # les features recues, en JSON
-                proba=float(proba),
-                decision=decision,
-                t_inf=float(temps_inference_ms),
-                t_tot=float(latence_totale_ms),
-            )
-        finally:
-            conn.close()
-    except Exception as e:
-        # On n'interrompt pas la reponse : on signale juste dans la console
-        print(f"[WARN] Echec de l'ecriture du log : {e}")
+            df_client = pd.DataFrame([donnees])
 
-    # --------------------------------------------------------
-    # 7.6 - Renvoyer le resultat au client
-    # --------------------------------------------------------
-    return {
-        "probabilite_defaut": round(float(proba), 4),
-        "decision": decision,             # 0 = credit ok | 1 = risque
-        "seuil_utilise": SEUIL,
-        "temps_inference_ms": round(temps_inference_ms, 2),   # info utile cote client
-        "latence_totale_ms": round(latence_totale_ms, 2),
-    }
+            # CHRONO 2 : uniquement autour du calcul du modele (temps d'inference pur)
+            debut_inference = time.perf_counter()
+            proba = modele_sklearn.predict_proba(df_client)[0][1]
+            temps_inference_ms = (time.perf_counter() - debut_inference) * 1000  # en millisecondes
+
+        except Exception as e:
+            raise HTTPException(status_code=422, detail=f"Erreur lors de la prediction : {str(e)}")
+
+        # --------------------------------------------------------
+        # 7.4 - Appliquer le seuil
+        # --------------------------------------------------------
+        decision = int(proba >= SEUIL)
+
+        # Fin de la latence totale (toute la requete jusqu'ici)
+        latence_totale_ms = (time.perf_counter() - debut_total) * 1000  # en millisecondes
+
+        # --------------------------------------------------------
+        # 7.5 - LOGUER l'appel REUSSI (statut = ok)
+        # --------------------------------------------------------
+        logger_appel(
+            donnees, proba, decision, temps_inference_ms, latence_totale_ms,
+            statut="ok", code_http=200, message_erreur=None,
+        )
+
+        # --------------------------------------------------------
+        # 7.6 - Renvoyer le resultat au client
+        # --------------------------------------------------------
+        return {
+            "probabilite_defaut": round(float(proba), 4),
+            "decision": decision,             # 0 = credit ok | 1 = risque
+            "seuil_utilise": SEUIL,
+            "temps_inference_ms": round(temps_inference_ms, 2),   # info utile cote client
+            "latence_totale_ms": round(latence_totale_ms, 2),
+        }
+
+    except HTTPException as exc:
+        # --------------------------------------------------------
+        # 7.7 - LOGUER l'appel EN ERREUR (statut = erreur), puis relayer l'erreur
+        # --------------------------------------------------------
+        latence_totale_ms = (time.perf_counter() - debut_total) * 1000
+        logger_appel(
+            donnees, None, None, temps_inference_ms, latence_totale_ms,
+            statut="erreur", code_http=exc.status_code, message_erreur=str(exc.detail),
+        )
+        raise   # on relaie l'erreur au client (il recoit bien son 422 / 500)
 
 
 # ------------------------------------------------------------
@@ -312,5 +350,3 @@ def predire_par_id(sk_id_curr: int):
         "date_calcul": str(date_calcul),          # quand le batch a calcule ce score
         "source": "precalcule",                   # pour distinguer du live
     }
-
-

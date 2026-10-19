@@ -16,20 +16,24 @@ CREATE TABLE IF NOT EXISTS clients (
     date_calcul  TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP  -- date du précalcul batch
 );
 
+
 -- ───────────────────────────────────────────────────────────────
 -- TABLE logs : journal des appels API en PRODUCTION (monitoring)
--- Écrite à chaque appel live. Lue par le script d'analyse de drift
+-- Écrite à chaque appel (REUSSI ou EN ERREUR). Lue par le drift + dashboard
 -- Objectif : stocker inputs + outputs + temps (exigé par l'énoncé)
 -- ───────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS logs (
-    id                  BIGSERIAL  PRIMARY KEY,  -- ID auto-incrémenté (1 client peut être appelé N fois)
-    sk_id_curr          BIGINT,                  -- ID client (NULL possible si nouveau client)
-    inputs              JSONB      NOT NULL,      -- features reçues en entrée (pour le drift)
-    proba               REAL       NOT NULL,      -- proba renvoyée (output)
-    decision            SMALLINT   NOT NULL,      -- décision renvoyée (output)
-    temps_inference_ms  REAL       NOT NULL,      -- temps d'inférence du modèle en ms (predict_proba seul)
-    latence_totale_ms   REAL       NOT NULL,      -- latence totale de la requête API en ms (validation + inférence + réponse)
-    timestamp_appel     TIMESTAMP  NOT NULL DEFAULT CURRENT_TIMESTAMP  -- horodatage de l'appel
+    id                  BIGSERIAL  PRIMARY KEY,  -- ID auto-incrémenté
+    sk_id_curr          BIGINT,                  -- ID client (NULL si nouveau/erreur)
+    inputs              JSONB      NOT NULL,      -- features reçues (pour le drift)
+    proba               REAL,                    -- proba renvoyée (NULL si erreur)
+    decision            SMALLINT,                -- décision (NULL si erreur)
+    temps_inference_ms  REAL,                    -- temps modèle en ms (NULL si erreur)
+    latence_totale_ms   REAL       NOT NULL,     -- latence totale (toujours mesurée)
+    statut              TEXT       NOT NULL DEFAULT 'ok',  -- 'ok' ou 'erreur'
+    code_http           INTEGER,                 -- 200, 422, 500... (NULL si ok historique)
+    message_erreur      TEXT,                    -- detail de l'erreur (NULL si ok)
+    timestamp_appel     TIMESTAMP  NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 -- ───────────────────────────────────────────────────────────────
