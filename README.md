@@ -1,6 +1,6 @@
 # Home Credit — Déploiement & Monitoring du modèle de scoring (MLOps partie 2)
 
-Mise en production d'un modèle de scoring crédit : API temps réel, conteneurisation Docker, CI/CD, stockage PostgreSQL, monitoring du data drift et dashboard.
+Mise en production d'un modèle de scoring crédit : API temps réel **sécurisée par clé**, conteneurisation Docker, **CI/CD automatisée**, stockage PostgreSQL, monitoring (erreurs, latences, data drift) et dashboard.
 
 Ce projet déploie le modèle développé lors du projet précédent (*Initiez-vous au MLOps*, entraînement et tracking MLflow).
 
@@ -25,21 +25,21 @@ Ce projet déploie le modèle développé lors du projet précédent (*Initiez-v
 
 ## Architecture
 
-Architecture hybride (forme B) : un batch précalcule les scores des clients
-connus, une API score les nouvelles demandes en temps réel.
+Architecture **hybride (forme A + forme B)** : un batch précalcule les scores des
+clients connus, une API score les nouvelles demandes en temps réel.
 
 ```
-┌─────────────┐      ┌──────────────┐      ┌─────────────────┐
-│  API FastAPI │─────▶│  PostgreSQL  │◀─────│  Dashboard      │
-│  (Render)    │      │  (Render)    │      │  Streamlit      │
-│              │      │              │      │                 │
+┌──────────────┐      ┌──────────────┐      ┌─────────────────┐
+│  API FastAPI │─────▶│  PostgreSQL  │◀─────│   Dashboard     │
+│  (Render)    │      │  (Render)    │      │   Streamlit     │
+│  + clé API   │      │              │      │                 │
 │ /predict      │      │ table clients│      │ métriques,      │
-│ /predict/{id} │      │ table logs   │      │ drift, latences │
-└─────────────┘      └──────────────┘      └─────────────────┘
+│ /predict/{id} │      │ table logs   │      │ erreurs, drift  │
+└──────────────┘      └──────────────┘      └─────────────────┘
 ```
 
-- **API** : charge le modèle une fois au démarrage (MLflow pyfunc).
-- **Base PostgreSQL** : table `clients` (scores précalculés) + table `logs` (appels de production pour le monitoring).
+- **API** : charge le modèle une fois au démarrage (MLflow pyfunc). Routes de prédiction **protégées par clé API**.
+- **Base PostgreSQL** : table `clients` (scores précalculés) + table `logs` (appels de production, réussis **et en erreur**, pour le monitoring).
 - **Dashboard** : lit la table `logs` et affiche les métriques de monitoring.
 
 ---
@@ -61,6 +61,23 @@ Les deux ne font pas doublon : la forme A gère les demandes nouvelles en temps
 réel, la forme B répond instantanément pour les clients existants. C'est le
 meilleur compromis entre réactivité et performance.
 
+---
+
+## Authentification
+
+Les routes de prédiction sont **protégées par une clé API**. Chaque appel doit
+fournir la clé dans le header **`X-API-Key`** ; sans clé valide → **401 Unauthorized**.
+La route d'accueil `/` reste **publique** (simple test de vie de l'API).
+
+- `GET /` → publique
+- `POST /predict` → protégée 🔒
+- `GET /predict/{sk_id_curr}` → protégée 🔒
+
+La clé est lue depuis la variable d'environnement **`API_KEY`** (jamais en dur dans
+le code) : définie dans le `.env` en local, et dans les variables d'environnement
+du service en production (Render).
+
+---
 
 ## Utiliser l'API
 
@@ -71,9 +88,17 @@ Deux routes de prédiction :
 | `/predict` | POST | **Live** — nouveau client : envoie ses 81 features, reçoit la proba + décision. L'appel est journalisé (monitoring). |
 | `/predict/{sk_id_curr}` | GET | **Façon B** — client connu : renvoie le score précalculé par son identifiant (réponse instantanée). |
 
-**Exemple (via Swagger)** : ouvrir `/docs`, déplier `POST /predict`, cliquer
-« Try it out », coller un JSON client (format `{"donnees": {...}}` avec les 81
-features), puis « Execute ».
+**Exemple (via Swagger)** : ouvrir `/docs`, cliquer **« Authorize »** et saisir la
+clé API, puis déplier `POST /predict`, « Try it out », coller un JSON client
+(format `{"donnees": {...}}` avec les 81 features), « Execute ».
+
+**Exemple (via curl)** :
+```bash
+curl -X POST "https://home-credit-mlops-w8ku.onrender.com/predict" \
+  -H "X-API-Key: <votre_cle>" \
+  -H "Content-Type: application/json" \
+  -d '{"donnees": { ... 81 features ... }}'
+```
 
 **Réponse type :**
 ```json
@@ -93,12 +118,17 @@ features), puis « Execute ».
 
 **Prérequis** : Python 3.11, [uv](https://docs.astral.sh/uv/), Docker Desktop.
 
+Créer un fichier `.env` à la racine (non versionné) :
+```
+DATABASE_URL=postgresql://credit_user:credit_pass@localhost:5433/credit_scoring
+API_KEY=ma-cle-locale-secrete
+```
+
 ### 1. Base de données (PostgreSQL via Docker)
 ```bash
 docker-compose up -d
 ```
-La base démarre sur le port **5433** et crée automatiquement les tables
-(`db/init.sql`).
+La base démarre sur le port **5433** et crée automatiquement les tables (`db/init.sql`).
 
 ### 2. API (FastAPI)
 ```bash
@@ -123,21 +153,25 @@ uv run streamlit run dashboard.py
 
 ---
 
-## Interpréter le monitoring
+## Monitoring
 
-Le dashboard (et le rapport de drift) présentent quatre éléments :
+Le dashboard Streamlit lit la table `logs` et présente :
 
-1. **Vue d'ensemble** : nombre d'appels, répartition accordés / refusés, temps d'inférence moyen.
-2. **Distribution des scores** : histogramme des probabilités prédites. Un décalage de cette distribution dans le temps peut signaler une dérive.
-3. **Performance** : temps d'inférence (modèle seul) et latence totale (requête complète). Permet de distinguer un ralentissement du modèle d'un ralentissement de l'API.
-4. **Analyse de data drift** (Evidently) : compare les données de production (table `logs`) aux données d'entraînement (référence).
-   - **Drift par colonne** : chaque feature est testée (KS pour les numériques, Chi-2 pour les catégorielles). Une feature est « dérivée » si sa distribution a significativement changé.
+1. **Vue d'ensemble** : nombre d'appels, taux de succès, répartition accordés / refusés.
+2. **Suivi des erreurs** : taux d'erreur, répartition par code HTTP (422 / 500), détail des dernières erreurs. *(Les appels en erreur sont journalisés — statut, code HTTP, message.)*
+3. **Performance** : latence moyenne **et percentiles p95 / p99** (révèlent les appels les plus lents que la moyenne masque), temps d'inférence du modèle.
+4. **Distribution des scores** : histogramme des probabilités prédites ; un décalage dans le temps peut signaler une dérive.
+5. **Analyse de data drift** (Evidently) : compare les données de production (table `logs`) aux données d'entraînement (référence).
+   - **Drift par colonne** : chaque feature est testée (KS pour les numériques, Chi-2 pour les catégorielles).
    - **Drift global** : signalé seulement si plus de 50 % des colonnes dérivent.
-   - **À surveiller** : un drift sur des features importantes du modèle justifie une investigation (voire un réentraînement).
+   - **À surveiller** : un drift sur des features importantes justifie une investigation (voire un réentraînement).
 
-**Régénérer le rapport de drift :**
+Le dashboard est **interactif** : filtre par période (1h / 24h / 7j / 30j) et bouton d'actualisation.
+
+**Régénérer le rapport de drift** (script **configurable** : fenêtre temporelle, seuil, taille d'échantillon) :
 ```bash
-uv run python scripts/analyser_drift.py   # génère rapport_drift.html
+uv run python scripts/analyser_drift.py            # tout l'historique
+uv run python scripts/analyser_drift.py --jours 7  # 7 derniers jours
 ```
 
 ---
@@ -145,10 +179,12 @@ uv run python scripts/analyser_drift.py   # génère rapport_drift.html
 ## Optimisation des performances
 
 Le profiling (`scripts/profiling.py`, cProfile) a montré que le goulot
-d'étranglement est le **prétraitement** (~70 % du temps), pas le modèle.
-L'optimisation retenue est la **prédiction par batch** (~500× plus rapide que
-le traitement un-par-un, sans régression sur les prédictions), appliquée au
-batch de précalcul. Détails dans [`RAPPORT_OPTIMISATION.md`](RAPPORT_OPTIMISATION.md).
+d'étranglement est le **prétraitement** (~70 % du temps), pas le modèle (~13 %).
+L'optimisation retenue est la **prédiction par batch** : traiter plusieurs clients
+en un seul appel fait le prétraitement **une fois au lieu de N** → **~500× plus
+rapide** que le traitement un-par-un, sans régression sur les prédictions.
+Appliquée au batch de précalcul (l'API live reste unitaire, par nature temps réel).
+Détails dans [`RAPPORT_OPTIMISATION.md`](RAPPORT_OPTIMISATION.md).
 
 ```bash
 uv run python scripts/optimisation.py   # compare 1-par-1 vs batch
@@ -158,9 +194,16 @@ uv run python scripts/optimisation.py   # compare 1-par-1 vs batch
 
 ## CI/CD
 
-- **CI** (GitHub Actions, `.github/workflows/ci.yml`) : à chaque push sur `main`,
-  exécution des tests (pytest, couverture) puis build de l'image Docker.
-- **CD** : déploiement sur Render (image Docker) et Streamlit Cloud (dashboard).
+À chaque **push sur `main`** (GitHub Actions, `.github/workflows/ci.yml`), la chaîne
+s'exécute **automatiquement** :
+
+1. **Tests** : pytest (8 tests, ~87 % de couverture), incluant la validation des
+   entrées et un **test d'authentification** (401 sans clé).
+2. **Build** de l'image Docker.
+3. **Déploiement continu** : déclenchement automatique du déploiement sur Render
+   (via **Deploy Hook**).
+
+Le dashboard est déployé sur **Streamlit Cloud**.
 
 ---
 
@@ -168,35 +211,48 @@ uv run python scripts/optimisation.py   # compare 1-par-1 vs batch
 
 ```
 home-credit-mlops/
+├── .github/workflows/ci.yml   # Pipeline CI/CD (tests + build + déploiement auto)
 ├── app/
-│   └── main.py              # API FastAPI (routes /predict, connexion DB, logs)
+│   └── main.py                # API FastAPI (routes /predict, auth, logs)
 ├── db/
-│   └── init.sql             # Schéma des tables clients et logs
-├── model/                   # Modèle MLflow exporté (model.pkl, signature, seuil)
+│   └── init.sql               # Schéma des tables clients et logs
+├── model/                     # Modèle MLflow exporté (model.pkl, signature, seuil)
 ├── scripts/
-│   ├── batch_scoring.py     # Précalcul des scores (façon B)
-│   ├── simuler_trafic.py    # Génération de trafic de production
-│   ├── analyser_drift.py    # Analyse de drift (Evidently)
-│   ├── profiling.py         # Profiling de l'inférence (cProfile)
-│   ├── optimisation.py      # Comparaison 1-par-1 vs batch
-│   └── init_db_deployee.py  # Création des tables sur la base déployée
-├── tests/                   # Tests unitaires (pytest)
-├── dashboard.py             # Dashboard de monitoring (Streamlit)
-├── docker-compose.yml       # Base PostgreSQL locale
-├── Dockerfile               # Conteneurisation de l'API
-├── requirements-api.txt     # Dépendances de l'API (Docker)
-├── pyproject.toml           # Dépendances du projet (uv)
-├── RAPPORT_OPTIMISATION.md  # Rapport d'optimisation (phase 5)
-└── rapport_drift.html       # Rapport de drift généré
+│   ├── batch_scoring.py       # Précalcul des scores (façon B)
+│   ├── simuler_trafic.py      # Génération de trafic de production
+│   ├── analyser_drift.py      # Analyse de drift (Evidently), configurable
+│   ├── profiling.py           # Profiling de l'inférence (cProfile)
+│   ├── optimisation.py        # Comparaison 1-par-1 vs batch
+│   ├── appliquer_migration.py # Migration DB (colonnes de suivi des erreurs)
+│   └── init_db_deployee.py    # Création des tables sur la base déployée
+├── src/                       # Code du projet 1 (préparation des données, entraînement)
+├── tests/                     # Tests unitaires (pytest)
+├── dashboard.py               # Dashboard de monitoring (Streamlit)
+├── docker-compose.yml         # Base PostgreSQL locale
+├── Dockerfile                 # Conteneurisation de l'API
+├── requirements-api.txt       # Dépendances de l'API (Docker)
+├── pyproject.toml / uv.lock   # Dépendances du projet (uv)
+├── RAPPORT_OPTIMISATION.md    # Rapport d'optimisation (phase 5)
+└── rapport_drift.html         # Rapport de drift généré
 ```
+
+> Les scripts d'entraînement du projet 1 (`train.py`, `evaluate.py`, etc.) sont
+> conservés à la racine / dans `src/` pour la traçabilité du cycle de vie du modèle.
 
 ---
 
-## Gestion des secrets
+## Gestion des secrets & données
 
-Les identifiants de la base ne sont jamais versionnés :
-- **En local** : fichier `.env` (ignoré par `.gitignore`).
-- **En déploiement** : variables d'environnement des plateformes (Render, Streamlit Cloud).
+Aucun secret n'est versionné (fichier `.env` ignoré par `.gitignore`) :
 
-La connexion lit l'URL depuis la variable `DATABASE_URL`, avec une valeur par
-défaut locale. Le SSL est activé automatiquement pour la base déployée.
+- **`DATABASE_URL`** : connexion à la base PostgreSQL.
+- **`API_KEY`** : clé d'authentification de l'API.
+- Le **Deploy Hook** Render est stocké en secret GitHub Actions.
+
+En local : fichier `.env`. En production : variables d'environnement des plateformes
+(Render, Streamlit Cloud). La connexion lit l'URL depuis `DATABASE_URL`, avec une
+valeur par défaut locale ; le **SSL** est activé automatiquement pour la base déployée.
+
+**RGPD** : les features stockées dans `logs` sont des données personnelles. Le
+stockage structuré en base (plutôt que des fichiers épars) permet un accès maîtrisé ;
+en contexte réel, on y ajouterait une politique de rétention et une anonymisation.
