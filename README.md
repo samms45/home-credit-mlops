@@ -200,3 +200,7 @@ Les identifiants de la base ne sont jamais versionnés :
 
 La connexion lit l'URL depuis la variable `DATABASE_URL`, avec une valeur par
 défaut locale. Le SSL est activé automatiquement pour la base déployée.
+
+
+
+Test avant soutenance 
