@@ -256,3 +256,6 @@ valeur par défaut locale ; le **SSL** est activé automatiquement pour la base 
 **RGPD** : les features stockées dans `logs` sont des données personnelles. Le
 stockage structuré en base (plutôt que des fichiers épars) permet un accès maîtrisé ;
 en contexte réel, on y ajouterait une politique de rétention et une anonymisation.
+
+
+Test 1
